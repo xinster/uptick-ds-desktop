@@ -1,0 +1,17 @@
+node_modules/
+dist/
+npm-cache/
+.electron-cache/
+.user-data/
+*.log
+.DS_Store
+.smoke-write.txt
+audit-report.html
+audit-report.md
+.npmrc
+
+# 敏感数据与本地配置（防隐私/密钥泄露）
+*.pem
+*.key
+.env
+.env.local

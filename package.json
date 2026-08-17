@@ -1,0 +1,23 @@
+{
+  "name": "ds-desktop",
+  "productName": "DeepSeek Desktop",
+  "version": "1.0.0",
+  "description": "桌面版 AI 助手 —— 由 DeepSeek 驱动，部署在本地",
+  "main": "src/main.js",
+  "author": "DS Desktop",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "smoke": "electron . --smoke-test --no-sandbox --disable-gpu",
+    "pack": "electron-packager . DeepSeekDesktop --platform=darwin --arch=arm64 --overwrite --asar --app-bundle-id=com.ds.desktop --app-version=1.0.0 --icon=assets/icon.icns --out=dist --download.cacheRoot=.electron-cache --ignore=\"^/(\\.electron-cache|npm-cache|scripts|\\.gitignore|\\.npmrc|dist)(/|$)\""
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/server-filesystem": "^2026.7.10",
+    "electron": "^33.0.0",
+    "electron-packager": "^17.1.2"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "marked": "^12.0.0"
+  }
+}

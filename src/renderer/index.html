@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none';" />
+  <title>DeepSeek Desktop</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="../vendor/katex/katex.min.css" />
+  <link rel="stylesheet" id="hljs-dark" href="../vendor/hljs-github-dark.css" />
+  <link rel="stylesheet" id="hljs-light" href="../vendor/hljs-github.css" disabled />
+</head>
+<body>
+  <div id="app">
+    <!-- Codex 风格左侧栏 -->
+    <aside id="sidebar">
+      <div class="side-brand">
+        <span class="side-logo">◆</span>
+        <span class="side-name">DeepSeek Desktop</span>
+      </div>
+
+      <div class="mode-switch" title="模式：Chat 纯对话 · Work 完整工具能力">
+        <button id="mode-chat" class="mode-btn">💬 Chat</button>
+        <button id="mode-work" class="mode-btn active">🔧 Work</button>
+      </div>
+
+      <div class="project-bar">
+        <select id="project-select" class="project-select" title="按项目过滤会话">
+          <option value="">全部会话</option>
+          <option value="__none__">未分配</option>
+        </select>
+        <button id="btn-new-project" class="btn ghost icon project-add" title="新建项目">＋</button>
+      </div>
+
+      <button id="btn-new" class="new-chat" title="新对话 (⌘N)">
+        <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>
+        <span>新对话</span>
+      </button>
+
+      <input id="session-search" class="search-box" type="text" placeholder="搜索会话… (⌘K)" spellcheck="false" />
+
+      <nav id="session-list" aria-label="历史对话"></nav>
+
+      <div id="file-panel">
+        <div class="file-head" id="file-head" title="工作区文件">
+          <span class="file-arrow" id="file-arrow">▸</span>
+          <span class="file-title">📁 文件</span>
+          <span class="file-refresh" id="file-refresh" title="刷新">⟳</span>
+        </div>
+        <div id="file-tree" class="file-tree" hidden></div>
+      </div>
+
+      <div class="side-footer">
+        <button id="btn-workspace" class="side-ws" title="点击选择工作区目录">
+          <span class="ws-ico">📁</span>
+          <span id="ws-name" class="ws-name">未设置工作区</span>
+        </button>
+        <div class="side-status" id="status-line"></div>
+        <label class="model-pick">
+          <span>模型</span>
+          <select id="model-select"></select>
+        </label>
+        <div class="side-actions">
+          <button id="btn-pin-window" class="side-btn" title="窗口置顶 (⌘P)">
+            <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M16 3l5 5-3.5 1-4 4-1 5L9 14l-5 5 1-5 5-1 4-4L15 6z" transform="rotate(45 12 12)"/></svg>
+            <span>置顶</span>
+          </button>
+          <button id="btn-export" class="side-btn" title="导出当前对话 (⌘E)">
+            <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M12 16l-5-5h3V4h4v7h3zm-7 4h14v-2H5z"/></svg>
+            <span>导出</span>
+          </button>
+          <button id="btn-settings" class="side-btn" title="设置 (⌘,)">
+            <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94s-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96a7.06 7.06 0 0 0-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84a.48.48 0 0 0-.48.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.37 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.48-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.49.49 0 0 0-.12-.61zM12 15.6A3.61 3.61 0 0 1 8.4 12 3.61 3.61 0 0 1 12 8.4a3.61 3.61 0 0 1 3.6 3.6 3.61 3.61 0 0 1-3.6 3.6z"/></svg>
+            <span>设置</span>
+          </button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- 主聊天区 -->
+    <main id="main">
+      <div id="messages" aria-live="polite"></div>
+
+      <div id="composer-wrap">
+        <div id="composer">
+          <textarea id="input" rows="1" placeholder="问点什么，或者让我帮你写代码…（Enter 发送，Shift+Enter 换行）"></textarea>
+          <button id="btn-send" class="send-btn" title="发送">
+            <svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+          </button>
+          <button id="btn-stop" class="send-btn stop" title="停止生成" hidden>
+            <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M6 6h12v12H6z"/></svg>
+          </button>
+        </div>
+        <p class="hint">内容由 DeepSeek 生成，请核对关键信息 · <a id="hint-settings">设置</a></p>
+      </div>
+    </main>
+  </div>
+
+  <!-- settings modal -->
+  <div id="modal-mask" hidden>
+    <div id="modal" role="dialog" aria-label="设置">
+      <h2>设置</h2>
+
+      <div class="set-group">
+        <h3>模型</h3>
+        <label class="field">
+          <span>外观主题</span>
+          <select id="set-theme" class="select-wide">
+            <option value="dark">深色</option>
+            <option value="light">浅色</option>
+            <option value="system">跟随系统</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>API Key</span>
+          <input id="set-key" type="password" placeholder="留空则使用 ~/.dsh/.credentials.yaml" autocomplete="off" />
+          <small id="key-status"></small>
+        </label>
+        <label class="field">
+          <span>API Base（接 Ollama / OpenAI 兼容端点，默认 https://api.deepseek.com）</span>
+          <input id="set-apibase" type="text" placeholder="https://api.deepseek.com" spellcheck="false" />
+        </label>
+        <label class="field">
+          <span>自定义模型（每行一个，追加到模型列表）</span>
+          <textarea id="set-models" rows="2" placeholder="例如：&#10;ollama/qwen2.5-coder:7b&#10;gpt-4o-mini"></textarea>
+        </label>
+        <label class="field">
+          <span>系统提示词（角色设定）</span>
+          <div id="prompt-templates" class="prompt-templates"></div>
+          <textarea id="set-system" rows="4"></textarea>
+        </label>
+        <div class="field-row">
+          <label class="field">
+            <span>温度 <em id="temp-val">0.7</em></span>
+            <input id="set-temp" type="range" min="0" max="2" step="0.1" value="0.7" />
+          </label>
+          <label class="field">
+            <span>最大输出 tokens</span>
+            <input id="set-max" type="number" min="256" max="8192" step="256" value="4096" />
+          </label>
+        </div>
+      </div>
+
+      <div class="set-group">
+        <h3>工作区</h3>
+        <label class="field">
+          <span>工作区目录</span>
+          <div class="ws-row">
+            <input id="set-workspace" type="text" placeholder="例如 ~/my-project" />
+            <button id="btn-pick-workspace" class="btn ghost btn-sm" type="button">选择…</button>
+          </div>
+          <small>工作区内的读取操作自动授权、不再弹窗；命令默认在此目录执行；相对路径以此目录为基准。</small>
+        </label>
+        <label class="checkbox-field">
+          <input type="checkbox" id="set-readonly" />
+          <span>只读模式（禁止执行任何命令，适合纯审计）</span>
+        </label>
+      </div>
+
+      <div class="set-group">
+        <h3>本地权限</h3>
+        <label class="checkbox-field">
+          <input type="checkbox" id="set-trust-home" />
+          <span>信任整个主目录（读操作不再弹窗询问）</span>
+        </label>
+        <div class="trust-block">
+          <div id="set-trust-list" class="trust-list"></div>
+          <small>访问其他位置、执行命令时会弹窗授权；在授权弹窗勾选「记住」后可加入下方列表。</small>
+          <button id="btn-clear-trust" class="btn ghost btn-sm" type="button">清除所有记住的目录</button>
+        </div>
+        <label class="field">
+          <span>命令白名单（整条命令精确匹配，命中直接执行免弹窗，每行一条）</span>
+          <textarea id="set-cmds" rows="3" placeholder="例如：&#10;git status&#10;git diff --stat"></textarea>
+        </label>
+      </div>
+
+      <div class="set-group">
+        <h3>MCP 服务器</h3>
+        <div id="mcp-templates" class="mcp-templates"></div>
+        <div id="mcp-msg" class="mcp-msg" hidden></div>
+        <div id="mcp-list" class="mcp-list"></div>
+        <div class="mcp-add-row">
+          <input id="mcp-name" class="search-box" placeholder="名称（如 github）" spellcheck="false" />
+          <input id="mcp-command" class="search-box" placeholder="启动命令（如 npx @modelcontextprotocol/server-github）" spellcheck="false" />
+          <input id="mcp-args" class="search-box" placeholder="参数（空格分隔，可选）" spellcheck="false" />
+        </div>
+        <div class="modal-actions" style="justify-content:flex-start;">
+          <button id="btn-mcp-add" class="btn ghost btn-sm">添加并连接</button>
+          <button id="btn-mcp-test" class="btn ghost btn-sm">测试连接</button>
+        </div>
+        <small>MCP 工具会自动合并进模型可用的工具（🔌 前缀）；未信任的服务器每次调用会弹窗授权。</small>
+      </div>
+
+      <div class="set-group">
+        <h3>用量统计</h3>
+        <div id="usage-stats" class="usage-stats"></div>
+        <button id="btn-clear-usage" class="btn ghost btn-sm">清空统计</button>
+        <small>按历史公开定价估算，仅供参考；模型未定价时按 0 计。</small>
+      </div>
+
+      <div class="modal-actions">
+        <button id="btn-export-all" class="btn ghost">导出全部会话…</button>
+        <button id="btn-save-settings" class="btn primary">保存</button>
+        <button id="btn-close-settings" class="btn ghost">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 文件预览面板 -->
+  <div id="preview-panel" hidden>
+    <div class="cv-header">
+      <span class="cv-title">📄 文件</span>
+      <span id="pv-path" class="cv-path"></span>
+      <div class="cv-actions">
+        <button id="pv-attach" class="btn ghost btn-sm">附加到对话</button>
+        <button id="pv-close" class="btn ghost btn-sm">关闭</button>
+      </div>
+    </div>
+    <pre id="pv-body" class="pv-body"></pre>
+  </div>
+
+  <!-- Canvas 代码编辑面板 -->
+  <div id="canvas-panel" hidden>
+    <div class="cv-header">
+      <span class="cv-title">✏️ Canvas</span>
+      <span id="cv-path" class="cv-path"></span>
+      <div class="cv-actions">
+        <button id="cv-save" class="btn ghost btn-sm">保存…</button>
+        <button id="cv-copy" class="btn ghost btn-sm">复制</button>
+        <button id="cv-close" class="btn ghost btn-sm">关闭</button>
+      </div>
+    </div>
+    <textarea id="cv-editor" spellcheck="false" wrap="off"></textarea>
+  </div>
+
+  <!-- 快捷键面板 -->
+  <div id="shortcuts-mask" hidden>
+    <div id="shortcuts-modal">
+      <h2>⌨️ 快捷键</h2>
+      <table>
+        <tr><td><kbd>⌘N</kbd></td><td>新对话</td></tr>
+        <tr><td><kbd>⌘K</kbd></td><td>搜索会话</td></tr>
+        <tr><td><kbd>⌘L</kbd></td><td>聚焦输入框</td></tr>
+        <tr><td><kbd>⌘,</kbd></td><td>打开设置</td></tr>
+        <tr><td><kbd>⌘P</kbd></td><td>窗口置顶</td></tr>
+        <tr><td><kbd>⌘O</kbd></td><td>选择工作区</td></tr>
+        <tr><td><kbd>⌘E</kbd></td><td>导出当前对话</td></tr>
+        <tr><td><kbd>⌘⇧空格</kbd></td><td>任意应用唤起窗口</td></tr>
+        <tr><td><kbd>↑ / ↓</kbd></td><td>输入历史</td></tr>
+        <tr><td><kbd>Esc</kbd></td><td>关闭弹窗</td></tr>
+      </table>
+      <div class="modal-actions"><button id="btn-close-shortcuts" class="btn ghost">关闭</button></div>
+    </div>
+  </div>
+
+  <!-- 权限请求弹窗 -->
+  <div id="perm-mask" hidden>
+    <div id="perm-modal" role="alertdialog" aria-label="权限请求">
+      <div class="perm-head">
+        <span class="perm-icon" id="perm-icon">🔒</span>
+        <h2>权限请求</h2>
+      </div>
+      <p class="perm-desc" id="perm-desc">DeepSeek Desktop 需要你的授权：</p>
+      <div class="perm-target" id="perm-target"></div>
+      <label class="perm-remember" id="perm-remember-wrap">
+        <input type="checkbox" id="perm-remember" />
+        <span id="perm-remember-label">记住此目录，以后读取不再询问</span>
+      </label>
+      <div class="modal-actions">
+        <button id="btn-perm-deny" class="btn ghost">拒绝</button>
+        <button id="btn-perm-allow" class="btn primary">允许</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="../vendor/marked.min.js"></script>
+  <script src="../vendor/purify.min.js"></script>
+  <script src="../vendor/katex/katex.min.js"></script>
+  <script src="../vendor/mermaid.min.js"></script>
+  <script src="../vendor/highlight.min.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>
