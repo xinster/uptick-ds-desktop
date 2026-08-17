@@ -2,6 +2,8 @@
 
 本地 agentic AI 桌面客户端：模型直接操作你的电脑（读写文件、搜索代码、执行命令、调用 MCP 工具），每一步都有明确的权限边界。Codex 风格界面，双模式（Chat / Work），由 DeepSeek API 驱动。
 
+[下载最新版 macOS 安装包](https://github.com/xinster/uptick-ds-desktop/releases/latest)
+
 ## 核心特性
 
 - 🔄 **双模式（Chat / Work）**：侧栏顶部一键切换，并**与模型联动**——Work 自动用 `deepseek-reasoner`（复杂任务更稳），Chat 自动用 `deepseek-chat`（轻快）
@@ -16,7 +18,16 @@
 - 🧩 **Markdown 增强**：代码高亮、KaTeX 公式、Mermaid 流程图、代码块复制/编辑
 - 🔊 朗读回复、输入历史、主题切换、会话搜索/固定/重命名、归档导出、与 DSH Harness 互通
 
-## 快速开始
+## 下载安装
+
+前往 [GitHub Releases](https://github.com/xinster/uptick-ds-desktop/releases/latest)，根据 Mac 处理器下载对应的 `.dmg`：
+
+- Apple Silicon（M1/M2/M3/M4 等）：`macos-arm64.dmg`
+- Intel Mac：`macos-x64.dmg`
+
+打开 DMG，把 DeepSeek Desktop 拖入 Applications 即可。正式公开分发时应配置下文的 Apple 签名和公证密钥；未签名的测试构建可能需要在 Finder 中右键应用并选择“打开”。
+
+## 从源码运行
 
 需要 Node.js 22.12 或更高版本。
 
@@ -28,6 +39,26 @@ npm run pack         # 打包到 dist/
 ```
 
 首次使用：设置 → 选择工作区 →（可选）添加 MCP 服务器 → 开聊。
+
+## 发布版本
+
+推送 `v` 开头的 Git tag 后，GitHub Actions 会自动构建 Apple Silicon 和 Intel 两个版本，生成 DMG、ZIP 和 SHA-256 校验文件，并上传到对应的 GitHub Release：
+
+```bash
+npm version patch
+git push origin main --follow-tags
+```
+
+若要让用户无需绕过 Gatekeeper 即可直接安装，请在仓库的 Actions secrets 中配置：
+
+- `MACOS_CERTIFICATE`：Developer ID Application `.p12` 文件的 Base64 内容
+- `MACOS_CERTIFICATE_PASSWORD`：证书密码
+- `KEYCHAIN_PASSWORD`：CI 临时钥匙串密码
+- `APPLE_ID`：用于公证的 Apple ID
+- `APPLE_APP_SPECIFIC_PASSWORD`：Apple ID 专用密码
+- `APPLE_TEAM_ID`：Apple Developer Team ID
+
+未配置这些 secrets 时仍会生成可下载的未签名测试安装包。
 
 ## 架构
 
