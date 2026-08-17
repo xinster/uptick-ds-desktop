@@ -35,6 +35,7 @@ if (SMOKE_TEST && process.env.DS_DESKTOP_USER_DATA) {
 
 let mainWindow = null;
 let settings = null;
+let isQuitting = false;                    // Cmd+Q / 真正退出时才允许销毁窗口
 const activeRequests = new Map();        // requestId -> AbortController（单轮流式）
 const chatMasters = new Map();           // requestId -> AbortController（贯穿整个对话，含工具执行）
 const pendingPermissions = new Map();    // permId -> { resolve, timer }
@@ -1958,11 +1959,35 @@ function createWindow() {
   mainWindow.webContents.session.setPermissionCheckHandler(() => false);
 
   mainWindow.once('ready-to-show', () => mainWindow.show());
+  // macOS 标准行为：红色关闭按钮 = 隐藏到后台（Dock 点击恢复），Cmd+Q 才真正退出
+  mainWindow.on('close', (e) => {
+    if (!isQuitting && !SMOKE_TEST && process.platform === 'darwin') {
+      e.preventDefault();
+      mainWindow.hide();
+    }
+  });
   mainWindow.on('closed', () => { mainWindow = null; });
   return mainWindow;
 }
 
-app.whenReady().then(() => {
+function focusMainWindow() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  } else {
+    createWindow();
+  }
+}
+
+// 单实例锁：Dock/访达重复启动时聚焦已有窗口，而不是再开一个实例
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => focusMainWindow());
+
+  app.whenReady().then(() => {
   settings = loadSettings();
   let settingsMigrated = false;
   if (typeof settings.apiKey === 'string') {
@@ -1995,14 +2020,14 @@ app.whenReady().then(() => {
   }
 });
 
-app.on('will-quit', () => {
-  globalShortcut.unregisterAll();
-  disconnectAllMcp();
-});
+  app.on('before-quit', () => { isQuitting = true; });
+  app.on('will-quit', () => {
+    globalShortcut.unregisterAll();
+    disconnectAllMcp();
+  });
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
-});
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow();
-});
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') app.quit();
+  });
+  app.on('activate', () => focusMainWindow());
+}
