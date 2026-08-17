@@ -6,7 +6,7 @@ const { pathToFileURL } = require('url');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const os = require('os');
-const { execFile, spawn } = require('child_process');
+const { execFile, exec, spawn } = require('child_process');
 const http = require('http');
 const https = require('https');
 const { clipboard } = require('electron');
@@ -15,7 +15,7 @@ const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio
 
 const DEEPSEEK_BASE = process.env.DS_DESKTOP_API_BASE || 'https://api.deepseek.com';
 const DEFAULT_MODEL = 'deepseek-chat';
-const MAX_TOOL_ROUNDS = 20;  // 工具调用循环上限（审计等长任务需要更多轮次）
+const MAX_TOOL_ROUNDS = 40;  // 工具调用循环上限（长审计任务需要更多轮次）
 const MAX_TOOL_CALLS = 8;    // 单轮工具调用数上限
 const SMOKE_TEST = process.argv.includes('--smoke-test');
 const WORKSPACE = '/Users/brian/DS-Workspace';
@@ -544,37 +544,35 @@ async function executeTool(name, args, masterSignal) {
       // 只读模式：禁止执行命令
       if (settings && settings.readOnly) return { error: '只读模式已开启，禁止执行命令（可在设置中关闭）' };
       const cwd = path.resolve(String(args.cwd || '') || (settings && settings.workspace) || os.homedir());
-      // 安全加固：禁止 shell 运算符，避免 shell 注入。命令名与参数分离，用 execFile 直接执行。
+      // 含 shell 运算符 → 需要用户授权后用 shell 执行；否则 execFile 命令/参数分离
       const SHELL_META = /[;&|`\n]|\$\s*\(|\$\{/;
-      if (SHELL_META.test(command)) {
-        return { error: '命令包含 shell 运算符（如 ; & | 等），出于安全考虑已拒绝执行。请使用单一命令，例如：git status' };
-      }
-      const argv = command.split(/\s+/).filter(Boolean);
-      const cmdName = argv[0];
+      const hasMeta = SHELL_META.test(command);
+      const argv = hasMeta ? [] : command.split(/\s+/).filter(Boolean);
+      const cmdName = argv[0] || command.split(/\s+/)[0];
       const cmdArgs = argv.slice(1);
-      // 命令白名单：整条命令精确匹配（记住的是完整命令，如 "git status"）
+      // 白名单仅对无 shell 运算符的简单命令生效；复合命令一律弹窗授权
       const allowList = Array.isArray(settings && settings.allowedCommands) ? settings.allowedCommands : [];
-      // 仅允许完整命令精确匹配；命令名级授权会让任意参数绕过确认。
-      const whitelisted = allowList.includes(command);
+      // 白名单仅对无 shell 运算符的简单命令生效；仅允许完整命令精确匹配（命令名级授权会让任意参数绕过确认）
+      const whitelisted = !hasMeta && allowList.includes(command);
       // 默认只读命令白名单：仅当在工作区/信任目录内运行时免弹窗（检查环境不卡住）
       const inTrustedCwd = isTrusted(cwd);
-      const safeDefault = inTrustedCwd && DEFAULT_SAFE_COMMANDS.includes(command);
+      const safeDefault = !hasMeta && inTrustedCwd && DEFAULT_SAFE_COMMANDS.includes(command);
       if (!whitelisted && !safeDefault) {
-        const r = await askPermission({ kind: 'command', action: '执行命令', command, cwd });
+        const r = await askPermission({ kind: 'command', action: '执行命令', command, cwd, shell: hasMeta });
         if (!r.allow) return { error: '用户拒绝了命令执行权限（或授权超时）' };
-        if (r.remember) {
+        if (r.remember && !hasMeta) {
           if (!allowList.includes(command)) saveSettings({ allowedCommands: [...allowList, command] });
         }
       }
+      const opts = {
+        cwd,
+        timeout: Math.min(parseInt(args.timeout_ms, 10) || 30000, 60000),
+        maxBuffer: 2 * 1024 * 1024,
+        signal: masterSignal || undefined,
+        env: enrichedEnv(),
+      };
       return new Promise((res) => {
-        const timeout = Math.min(parseInt(args.timeout_ms, 10) || 30000, 60000);
-        execFile(cmdName, cmdArgs, {
-          cwd,
-          timeout,
-          maxBuffer: 2 * 1024 * 1024,
-          signal: masterSignal || undefined,
-          env: enrichedEnv(),
-        }, (err, stdout, stderr) => {
+        const cb = (err, stdout, stderr) => {
           if (err) {
             res({
               exit_code: typeof err.code === 'number' ? err.code : -1,
@@ -585,7 +583,9 @@ async function executeTool(name, args, masterSignal) {
           } else {
             res({ exit_code: 0, stdout: (stdout || '').slice(0, 100000), stderr: (stderr || '').slice(0, 100000) });
           }
-        });
+        };
+        if (hasMeta) exec(command, opts, cb);
+        else execFile(cmdName, cmdArgs, opts, cb);
       });
     }
     case 'write_file': {
@@ -767,7 +767,7 @@ async function streamChat(req, onDelta) {
     watchdog = setTimeout(() => {
       timedOut = true;
       controller.abort();
-    }, 60000);
+    }, 120000);
   };
   armWatchdog();
   try {
@@ -811,6 +811,7 @@ async function streamChat(req, onDelta) {
   let text = '';
   let reasoning = '';
   let usage = null;
+  let finishReason = null;
   let toolPendingNotified = false;
   const toolCalls = new Map(); // index -> {index, id, name, args}
 
@@ -864,6 +865,7 @@ async function streamChat(req, onDelta) {
         }
       }
       if (j.usage && j.usage.total_tokens) usage = j.usage;
+      if (choice.finish_reason) finishReason = choice.finish_reason;
     } catch {}
   };
 
@@ -888,10 +890,17 @@ async function streamChat(req, onDelta) {
   flush();
   onDelta({ type: 'end' });
 
+  // 空回复检测：流正常结束但无任何内容 → 明确报错（防止"没反应"）
+  if (!text && !reasoning && toolCalls.size === 0) {
+    logApp('error', `[chat] 空回复（finish=${finishReason || 'unknown'}）`);
+    throw new Error('模型未返回任何内容（可能是服务异常或输出被截断）。请重试。');
+  }
+
   return {
     text,
     reasoning,
     usage,
+    finishReason,
     toolCalls: [...toolCalls.values()]
       .filter((t) => t.id || t.name)
       .map((t) => {
@@ -949,11 +958,14 @@ async function agenticChat(req, onDelta) {
   };
   for (let round = 1; round <= MAX_TOOL_ROUNDS; round++) {
     if (masterSignal && masterSignal.aborted) throw new Error('已取消');
-    const res = await streamChat({ ...req, id: req.id, messages: msgs, maxTokens: 8192 }, onDelta);
+    // 输出预算按模型分级：reasoner 32K / chat 16K（实测 API 上限，大幅降低截断）
+    const modelName = req.model || DEFAULT_MODEL;
+    const maxTokens = modelName === 'deepseek-reasoner' ? 32768 : 16384;
+    const res = await streamChat({ ...req, id: req.id, messages: msgs, maxTokens }, onDelta);
     addUsage(res.usage);
 
     const calls = res.toolCalls || [];
-    if (calls.length === 0) return { toolsExecuted, rounds: round, usage: totalUsage }; // 本轮即最终回答
+    if (calls.length === 0) return { toolsExecuted, rounds: round, usage: totalUsage, finishReason: res.finishReason }; // 本轮即最终回答
 
     if (calls.length > MAX_TOOL_CALLS) throw new Error('工具调用数量过多');
     if (masterSignal && masterSignal.aborted) throw new Error('已取消');
@@ -1584,12 +1596,13 @@ secureHandle('chat:start', async (_e, req) => {
   chatMasters.set(id, master);
   try {
     if (req.mode === 'chat') {
-      // Chat 模式：单轮纯对话，无工具
-      const res = await streamChat({ ...req, id, masterSignal: master.signal }, (delta) => send('chat:delta', { id, delta }));
-      send('chat:done', { id, ok: true, tools: 0, usage: res.usage || null });
+      // Chat 模式：单轮纯对话，无工具（必须经过 buildMessages 把 text 映射为 content）
+      const msgs = buildMessages(req);
+      const res = await streamChat({ ...req, id, messages: msgs, masterSignal: master.signal }, (delta) => send('chat:delta', { id, delta }));
+      send('chat:done', { id, ok: true, tools: 0, usage: res.usage || null, finishReason: res.finishReason });
     } else {
       const meta = await agenticChat({ ...req, id, masterSignal: master.signal }, (delta) => send('chat:delta', { id, delta }));
-      send('chat:done', { id, ok: true, tools: meta.toolsExecuted, usage: meta.usage || null });
+      send('chat:done', { id, ok: true, tools: meta.toolsExecuted, usage: meta.usage || null, finishReason: meta.finishReason });
     }
   } catch (err) {
     logApp('error', `[chat] ${err.message}`);
@@ -1818,7 +1831,7 @@ async function runSmokeChecks(win) {
     console.log(`[smoke] safe-command OK in ${Date.now() - started}ms (pwd 免弹窗执行, 危险命令被拒)`);
   }
 
-  // 4. Chat 模式：不得产生工具调用，且有正常输出
+  // 4. Chat 模式：不得产生工具调用，且有正常输出（用渲染层真实格式 {role, text} 历史，防回归）
   {
     const req = {
       id: 'smoke-chat-mode',
@@ -1826,15 +1839,14 @@ async function runSmokeChecks(win) {
       model: (settings && settings.model) || DEFAULT_MODEL,
       system: '你是测试助手。',
       messages: [
-        { role: 'system', content: '你是测试助手。' },
-        { role: 'user', content: '用两个字回答：收到' },
+        { role: 'user', text: '用两个字回答：收到' },
       ],
       temperature: 0.2,
       maxTokens: 64,
     };
     const events = [];
     let got = '';
-    const res = await streamChat(req, (delta) => {
+    const res = await streamChat({ ...req, messages: buildMessages(req) }, (delta) => {
       if (delta.type === 'tool') events.push(delta);
       if (delta.type === 'text') got += delta.text;
     });

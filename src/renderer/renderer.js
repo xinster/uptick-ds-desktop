@@ -1061,12 +1061,17 @@ async function send() {
     .filter((m) => !m.streaming && !m.error && m.id !== reqId)
     .map((m) => ({ role: m.role, text: m.text }));
 
+  let system = state.settings.system || DEFAULT_SYSTEM;
+  if (state.mode === 'chat') {
+    // Chat 模式：引导模型在遇到需要本地工具的任务时输出升级标记
+    system += ' 重要：如果用户的任务需要读取/写入本地文件、搜索代码、执行命令，或进行多步骤复杂分析，请在你的回复的最后一行单独输出 [NEEDS_WORK_MODE] 标记（不要加任何解释，只输出标记这一行）。普通闲聊绝对不要输出该标记。';
+  }
   try {
     await window.ds.startChat({
       id: reqId,
       mode: state.mode,
       model: state.settings.model,
-      system: state.settings.system || DEFAULT_SYSTEM,
+      system,
       temperature: state.settings.temperature,
       maxTokens: state.settings.maxTokens,
       messages: history,
@@ -1351,11 +1356,16 @@ function bindEvents() {
     }
   });
 
-  window.ds.onDone(({ id, ok, usage }) => {
+  window.ds.onDone(({ id, ok, usage, finishReason }) => {
     const m = msgs().find((x) => x.id === id);
     if (m) {
       finishStreaming(m, null, usage);
       recordUsage(usage, state.settings.model);
+      // 输出被截断：明确提示（不再"无声半截"）
+      if (finishReason === 'length') {
+        setStatus('⚠ 输出已达单次长度上限被截断。可以让模型「继续」，或改用 write_file 写入文件。');
+      }
+      maybeSuggestWorkMode(m);
     }
   });
 
@@ -1592,6 +1602,31 @@ function bindEvents() {
     }
     $('perm-mask').hidden = true;
     setStatus('');
+  });
+}
+
+/* Chat → Work 智能升级引导：模型输出 [NEEDS_WORK_MODE] 标记时，提示用户切换并自动重跑任务 */
+function maybeSuggestWorkMode(m) {
+  if (state.mode !== 'chat') return;
+  if (!m || !m.text || !m.text.includes('[NEEDS_WORK_MODE]')) return;
+  // 移除标记（不显示给用户）
+  m.text = m.text.replace('[NEEDS_WORK_MODE]', '').replace(/\s+$/, '');
+  m.dirty = true;
+  renderNow();
+  persistNow();
+  const ok = confirm('这个任务需要本地工具（读取/写入文件、执行命令、多步骤分析）。建议切换到 Work 模式（模型将自动使用 deepseek-reasoner）。现在切换并重新执行吗？');
+  if (!ok) return;
+  const sess = activeSession();
+  if (!sess) return;
+  const lastUser = [...sess.messages].reverse().find((x) => x.role === 'user');
+  const task = lastUser ? lastUser.text : '';
+  setMode('work').then(() => {
+    if (task) {
+      $('input').value = task;
+      autoResize();
+      // 等模式切换与模型联动完成后再发送
+      setTimeout(() => { if (state.mode === 'work' && !state.streaming) send(); }, 300);
+    }
   });
 }
 
