@@ -1,61 +1,75 @@
-# DeepSeek Desktop 桌面版
+# DeepSeek Desktop
 
-「给自己做的桌面版」——一个由 DeepSeek API 驱动的 macOS 桌面 AI 助手。
+本地 agentic AI 桌面客户端：模型直接操作你的电脑（读写文件、搜索代码、执行命令、调用 MCP 工具），每一步都有明确的权限边界。Codex 风格界面，双模式（Chat / Work），由 DeepSeek API 驱动。
 
-## 已部署位置
+## 核心特性
 
-- 安装包: `/Applications/DeepSeekDesktop.app`（双击即可启动）
-- 工程源码: 本目录（`/Users/brian/DS-Workspace/ds-desktop`）
+- 🔄 **双模式（Chat / Work）**：侧栏顶部一键切换，并**与模型联动**——Work 自动用 `deepseek-reasoner`（复杂任务更稳），Chat 自动用 `deepseek-chat`（轻快）
+- 🔧 **Agentic 工具链**：`read_file` / `list_dir` / `grep` / `file_stat` / `run_command` / `write_file`，工具调用循环（20 轮上限、同轮并行、防重复空转、90s 超时）
+- 🔐 **权限安全模型**：工作区/信任目录内读写免弹窗，之外每次授权；命令白名单（含默认只读命令）；只读模式；权限弹窗排队 + 系统通知
+- 🗂️ **工作区（Workspace）**：目录选择、相对路径基准、自动信任；侧栏文件树 + 预览 + 附加到对话
+- 🔌 **MCP 支持**：连接任意 MCP 服务器（filesystem/GitHub/Brave/Puppeteer…），工具自动合并，支持工具级信任开关
+- 🖌️ **Canvas**：代码块一键进画布编辑、保存到工作区
+- 🗃️ **Projects**：项目空间、会话按项目分组、项目绑定工作区
+- 📊 **用量统计**：每次回复的 token 消耗 + 成本估算
+- 🌐 **全局唤起**：任意应用按 `⌘⇧空格` 唤起并聚焦输入框
+- 🧩 **Markdown 增强**：代码高亮、KaTeX 公式、Mermaid 流程图、代码块复制/编辑
+- 🔊 朗读回复、输入历史、主题切换、会话搜索/固定/重命名、归档导出、与 DSH Harness 互通
 
-## 功能
-
-- 🔄 **双模式（Chat / Work）**：侧栏顶部一键切换，对应新 ChatGPT 客户端中的 Chat 与 Codex Work——💬 Chat 纯对话（不注入工作区、不带工具、不访问本地）；🔧 Work 完整 agentic（工具/工作区/命令/审计）。会话创建时记录模式（侧栏 💬/🔧 徽标），发送按当前模式执行，Chat 模式下模型不会产生工具调用
-- 🗂️ **工作区（Workspace）**：设置工作区目录（侧栏 📁 快速切换，原生目录选择器）；工作区内读操作自动授权免弹窗、命令默认在工作区执行、相对路径以工作区为基准，系统提示词会注入当前工作区
-- 📋 **命令白名单**：设置中按前缀配置（如 `git status`），命中直接执行免弹窗；也可在授权弹窗勾选「记住此命令」
-- 🔒 **只读模式**：开启后禁止执行任何命令（适合纯审计）
-- 📊 **Token 用量**：每次回复完成后显示输入/输出 tokens
-- ⌨️ **快捷键**：⌘N 新对话 / ⌘K 搜索会话 / ⌘, 设置 / ⌘L 聚焦输入 / ⌘P 窗口置顶 / ⌘O 选择工作区 / ⌘E 导出
-- 🌗 **主题切换**：深色 / 浅色 / 跟随系统（代码高亮同步切换）
-- 🔍 **会话管理**：侧栏搜索框过滤会话（含消息内容）、双击标题重命名、📌 固定置顶分组
-- 🧩 **代码块增强**：语言标签 + 一键复制 + 语法高亮（highlight.js，已离线 vendor）
-- 📎 **文件拖放**：把本地文件拖进输入框，内容作为附件上下文发送（≤2MB 文本）
-- 🌐 **全局唤起**：任意应用按 `⌘⇧空格` 唤起窗口并聚焦输入框（Chat Bar 简化版）
-- 📌 **窗口置顶**：侧栏「置顶」按钮或 ⌘P
-- 🗂️ **Projects 项目空间**：侧栏项目选择器（全部/未分配/各项目）；新建项目（＋）后新对话自动归入；会话悬停 📁 一键分配到项目；按项目过滤会话
-- 🗄️ **会话归档导出**：设置里「导出全部会话…」一键把所有会话（含项目归属、工具调用记录）导出为单一 Markdown
-- ✏️ **Canvas 代码编辑**：任意代码块点「✏️ 编辑」在右侧画布打开，可修改、复制、保存到工作区（写入走授权弹窗，只读模式下禁用）
-- 🎨 Codex 风格界面：深色极简 + 左侧会话列表（多会话管理，按今天/昨天/近 7 天分组，⌘N 新对话）
-- 🔧 **Agentic 工具能力**：read_file / list_dir / grep / file_stat / run_command，模型可真实读取本地文件、搜索代码、执行命令（工具调用循环，最多 20 轮）
-- 🔐 **权限弹窗**：访问信任目录外的路径、执行命令时弹出授权窗口（允许/拒绝/记住此目录，120 秒超时自动拒绝）；信任目录可在设置中管理，也可一键信任整个主目录
-- 🐢 工具执行日志卡片：每条消息展示工具调用过程（图标、参数、结果摘要），不再"说了没反应"
-- 💬 流式对话（打字机效果，100ms 节流渲染 + 原地 DOM 更新，长文不卡），Markdown 渲染
-- 🧠 `deepseek-reasoner` 模型支持「思考过程」折叠展示
-- 🔑 API 密钥自动读取 `~/.dsh/.credentials.yaml` 中的 `DEEPSEEK_API_KEY`，也可在设置中自定义；密钥不出本机
-- ⚙️ 设置：系统提示词、温度、最大 tokens、模型切换、信任目录
-- 📤 导出对话为 Markdown（含工具调用记录）
-- 💾 多会话自动保存（localStorage，2s 节流），重启不丢失
-- ⏹ 停止生成 / ↩️ 重试 / 📋 复制消息
-
-## 开发
+## 快速开始
 
 ```bash
-npm install        # 已配置 npmmirror 镜像 + 项目内缓存
-npm start          # 开发模式启动
-npm run smoke      # 端到端冒烟测试（真实调用 API 后退出）
-npm run pack       # 打包成 .app 到 dist/
+npm install
+npm start            # 开发模式
+npm run smoke        # 全量冒烟测试（UI/工具/并行/write_file/双模式/MCP/网络）
+npm run pack         # 打包到 dist/
 ```
 
-## 技术栈
+首次使用：设置 → 选择工作区 →（可选）添加 MCP 服务器 → 开聊。
 
-- Electron 33（contextIsolation + sandbox，安全默认）
-- 主进程: 密钥解析 + DeepSeek `chat/completions` SSE 流式转发
-- 渲染层: 原生 HTML/CSS/JS + marked（已 vendor 到 `src/vendor/`，离线可用）
-- 图标: DeepSeek 官方鲸鱼 logo（来源 `assets/ds-avatar-source.png`，GitHub 组织头像）→ `scripts/make_icon.py` 合成蓝底白鲸 → `assets/icon.icns`
+## 架构
 
-## 说明
+```
+src/
+├── main.js          # 主进程：工具系统、权限闸门、流式网络层（原生 http）、MCP 客户端、IPC
+├── preload.js       # contextBridge 安全桥（仅暴露白名单 API）
+└── renderer/
+    ├── index.html   # 界面结构
+    ├── styles.css   # 主题（深/浅/跟随系统）
+    └── renderer.js  # 状态、渲染、事件、持久化、MCP/文件树/Canvas 等
+vendor/              # 离线资源：marked / DOMPurify / highlight.js / KaTeX / Mermaid
+scripts/make_icon.py # 图标生成（橙色鲸鱼）
+```
 
-- 默认模型 `deepseek-chat`，设置里可切 `deepseek-reasoner`
-- 冒烟测试用的 `--no-sandbox --disable-gpu` 仅限无图形受限环境；正常双击启动不需要
-- 受限环境可用 `DS_DESKTOP_USER_DATA=<可写目录>` 指定用户数据目录（设置/信任持久化）；正常环境默认 `~/Library/Application Support/DeepSeek Desktop`
-- 记住授权时若路径位于 git 仓库内，会自动记住**仓库根目录**（一次授权覆盖整个仓库）；非仓库目录则记住文件所在目录
-- 工具调用循环上限 20 轮、工具结果单条限长 150KB、流式 60s 无数据自动超时
+### 安全设计要点
+
+- **模型输出不可信**：Markdown 渲染经 DOMPurify 白名单净化（无 XSS）
+- **命令执行**：execFile 命令/参数分离，无 shell 注入面；白名单精确匹配
+- **文件访问**：工作区/信任目录内免弹窗，之外弹窗授权（写操作权限与读一致）
+- **设置白名单**：IPC 只接受预定义键 + 类型校验
+- **密钥不出本机**：API Key 仅用于本地请求头；支持环境变量/设置/~/.dsh 三级来源
+
+## 配置
+
+设置面板覆盖：API Key / API Base（支持 Ollama、OpenAI 兼容端点）/ 自定义模型 / 系统提示词模板 / 温度 / 工作区 / 只读模式 / 信任目录 / 命令白名单 / MCP 服务器 / 主题 / 用量统计。
+
+userData 默认位于 `~/Library/Application Support/DeepSeek Desktop`；全部错误写入 `app.log`（版本/工具/参数/权限全链路埋点，便于排查）。
+
+## 快捷键
+
+| 快捷键 | 功能 |
+|---|---|
+| `⌘N` / `⌘K` / `⌘L` / `⌘,` / `⌘P` / `⌘O` / `⌘E` | 新对话 / 搜索会话 / 聚焦输入 / 设置 / 窗口置顶 / 工作区 / 导出 |
+| `⌘⇧空格` | 任意应用唤起窗口 |
+| `↑` / `↓` | 输入历史 |
+| `⌘?` | 快捷键面板 |
+
+## 故障排查
+
+- 任何异常先看 `userData/app.log`（含 `[chat]`、`[tool]`、`[perm]`、`[renderer]` 全链路日志）
+- 网络失败：应用强制直连（不依赖系统代理）；错误带原因码（DNS/连接拒绝等）
+- 大文件写入：模型自动分段（write_file ≤6000 字符 + append），若仍卡住看工具卡片错误原文
+
+## License
+
+MIT © 2026 Brian <brian@starrycoffee.com>
