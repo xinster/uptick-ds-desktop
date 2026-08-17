@@ -6,15 +6,20 @@
   "main": "src/main.js",
   "author": "DS Desktop",
   "license": "MIT",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "start": "electron .",
+    "test": "node scripts/security-check.js",
+    "security-check": "node scripts/security-check.js",
     "smoke": "electron . --smoke-test --no-sandbox --disable-gpu",
     "pack": "electron-packager . DeepSeekDesktop --platform=darwin --arch=arm64 --overwrite --asar --app-bundle-id=com.ds.desktop --app-version=1.0.0 --icon=assets/icon.icns --out=dist --download.cacheRoot=.electron-cache --ignore=\"^/(\\.electron-cache|npm-cache|scripts|\\.gitignore|\\.npmrc|dist)(/|$)\""
   },
   "devDependencies": {
+    "@electron/packager": "^20.3.0",
     "@modelcontextprotocol/server-filesystem": "^2026.7.10",
-    "electron": "^33.0.0",
-    "electron-packager": "^17.1.2"
+    "electron": "^43.4.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

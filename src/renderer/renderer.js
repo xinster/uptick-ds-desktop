@@ -174,7 +174,8 @@ function ensureMermaid() {
       mermaid.initialize({
         startOnLoad: false,
         theme: 'dark',
-        securityLevel: 'loose',
+        securityLevel: 'strict',
+        htmlLabels: false,
       });
       mermaidReady = true;
     } catch {}
@@ -1306,6 +1307,11 @@ function bindEvents() {
       $('perm-desc').textContent = 'DeepSeek Desktop 想写入文件（写入操作每次都需要确认）：';
       $('perm-target').textContent = p.path;
       wrap.style.display = 'none';
+    } else if (p.kind === 'mcp_start') {
+      $('perm-icon').textContent = '⚙️';
+      $('perm-desc').textContent = 'DeepSeek Desktop 想启动以下本机进程：';
+      $('perm-target').textContent = `${p.command || ''}\n${p.argsSummary || ''}`;
+      wrap.style.display = 'none';
     } else if (p.kind === 'mcp') {
       $('perm-icon').textContent = '🔌';
       $('perm-desc').textContent = `DeepSeek Desktop 想调用 MCP 服务器「${p.mcpServer}」的工具：`;
@@ -1829,7 +1835,8 @@ async function mcpTest() {
 
 /* ---------------- 设置 ---------------- */
 function openSettings() {
-  $('set-key').value = state.settings.apiKey || '';
+  $('set-key').value = '';
+  $('set-key-clear').checked = false;
   $('set-system').value = state.settings.system || DEFAULT_SYSTEM;
   $('set-apibase').value = state.settings.apiBase || '';
   $('set-models').value = (state.settings.customModels || []).join('\n');
@@ -1879,8 +1886,8 @@ async function saveSettings() {
   const patch = {};
   const key = $('set-key').value.trim();
   const system = $('set-system').value.trim();
-  if (key) patch.apiKey = key;
-  if (!key && state.settings.apiKey) patch.apiKey = '';
+  if ($('set-key-clear').checked) patch.apiKey = '';
+  else if (key) patch.apiKey = key;
   patch.system = system;
   patch.temperature = parseFloat($('set-temp').value);
   patch.maxTokens = parseInt($('set-max').value, 10) || 4096;

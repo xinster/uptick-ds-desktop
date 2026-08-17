@@ -1,7 +1,8 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog, globalShortcut } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, globalShortcut, safeStorage, shell } = require('electron');
 const path = require('path');
+const { pathToFileURL } = require('url');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const os = require('os');
@@ -52,10 +53,35 @@ function loadSettings() {
   }
 }
 
+function decryptStoredApiKey(source) {
+  if (!source) return '';
+  if (source.apiKeyEncrypted && safeStorage.isEncryptionAvailable()) {
+    try {
+      return safeStorage.decryptString(Buffer.from(source.apiKeyEncrypted, 'base64')).trim();
+    } catch (e) {
+      console.error('[settings] API key decrypt failed:', e.message);
+    }
+  }
+  return typeof source.apiKey === 'string' ? source.apiKey.trim() : '';
+}
+
+function storeApiKey(next, value) {
+  const key = String(value || '').trim();
+  delete next.apiKey;
+  delete next.apiKeyEncrypted;
+  if (!key) return;
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error('系统安全存储当前不可用，API Key 未保存');
+  }
+  next.apiKeyEncrypted = safeStorage.encryptString(key).toString('base64');
+}
+
 function saveSettings(next) {
   settings = { ...settings, ...next };
   try {
-    fs.writeFileSync(settingsFile(), JSON.stringify(settings, null, 2), 'utf8');
+    fs.mkdirSync(path.dirname(settingsFile()), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(settingsFile(), JSON.stringify(settings, null, 2), { encoding: 'utf8', mode: 0o600 });
+    fs.chmodSync(settingsFile(), 0o600);
   } catch (e) {
     console.error('[settings] save failed:', e.message);
   }
@@ -64,7 +90,8 @@ function saveSettings(next) {
 
 function resolveApiKey() {
   if (process.env.DEEPSEEK_API_KEY) return process.env.DEEPSEEK_API_KEY.trim();
-  if (settings && settings.apiKey) return settings.apiKey.trim();
+  const stored = decryptStoredApiKey(settings);
+  if (stored) return stored;
   try {
     const p = path.join(os.homedir(), '.dsh', '.credentials.yaml');
     const txt = fs.readFileSync(p, 'utf8');
@@ -77,7 +104,7 @@ function resolveApiKey() {
 /* 当前密钥生效来源：env > settings > dsh */
 function apiKeySource() {
   if (process.env.DEEPSEEK_API_KEY && process.env.DEEPSEEK_API_KEY.trim()) return 'env';
-  if (settings && settings.apiKey && String(settings.apiKey).trim()) return 'settings';
+  if (decryptStoredApiKey(settings)) return 'settings';
   try {
     const p = path.join(os.homedir(), '.dsh', '.credentials.yaml');
     const txt = fs.readFileSync(p, 'utf8');
@@ -219,6 +246,35 @@ function isTrusted(p) {
   return trustedRoots().some((r) => real === r || real.startsWith(r + path.sep));
 }
 
+function nearestExistingRealpath(p) {
+  let current = path.resolve(p);
+  while (current !== path.dirname(current)) {
+    const real = safeRealpath(current);
+    if (real) return real;
+    current = path.dirname(current);
+  }
+  return null;
+}
+
+function isTrustedWriteTarget(p) {
+  const existingReal = safeRealpath(p);
+  const real = existingReal || nearestExistingRealpath(path.dirname(p));
+  if (!real) return false;
+  return trustedRoots().some((r) => real === r || real.startsWith(r + path.sep));
+}
+
+function writeTextNoFollow(p, content, append = false) {
+  fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o700 });
+  const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW
+    | (append ? fs.constants.O_APPEND : fs.constants.O_TRUNC);
+  const fd = fs.openSync(p, flags, 0o600);
+  try {
+    fs.writeFileSync(fd, content, 'utf8');
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function rememberPath(p) {
   const real = safeRealpath(p);
   if (!real) return;
@@ -231,6 +287,30 @@ function rememberPath(p) {
 
 function send(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
+}
+
+const APP_PAGE_URL = pathToFileURL(path.join(__dirname, 'renderer', 'index.html')).href;
+
+function isTrustedIpcEvent(event) {
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  const frame = event.senderFrame;
+  return event.sender === mainWindow.webContents
+    && frame === event.sender.mainFrame
+    && frame.url === APP_PAGE_URL;
+}
+
+function secureHandle(channel, handler) {
+  ipcMain.handle(channel, (event, ...args) => {
+    if (!isTrustedIpcEvent(event)) throw new Error('拒绝来自非应用页面的 IPC 请求');
+    return handler(event, ...args);
+  });
+}
+
+function secureOn(channel, handler) {
+  ipcMain.on(channel, (event, ...args) => {
+    if (!isTrustedIpcEvent(event)) return;
+    handler(event, ...args);
+  });
 }
 
 /* 权限弹窗排队：并行工具调用时一次只弹一个授权窗口 */
@@ -294,7 +374,7 @@ function findGitRoot(p) {
   return null;
 }
 
-ipcMain.handle('permission:respond', (_e, { permId, allow, remember }) => {
+secureHandle('permission:respond', (_e, { permId, allow, remember }) => {
   const p = pendingPermissions.get(permId);
   if (!p) return;
   clearTimeout(p.timer);
@@ -337,7 +417,7 @@ function fmtSize(n) {
 
 /* 写入授权：工作区/信任目录内免弹窗（与读取一致），之外每次弹窗 */
 async function ensureWritePermission(p) {
-  if (isTrusted(p)) return { allow: true };
+  if (isTrustedWriteTarget(p)) return { allow: true };
   const r = await askPermission({ kind: 'write', action: '写入文件', path: p });
   if (!r.allow) return { allow: false };
   return { allow: true };
@@ -352,7 +432,8 @@ async function executeTool(name, args, masterSignal) {
   if (name.startsWith('mcp__')) return callMcpTool(name, args);
   switch (name) {
     case 'read_file': {
-      const p = resolveToolPath(String(args.path || ''));
+      const requested = resolveToolPath(String(args.path || ''));
+      const p = safeRealpath(requested) || requested;
       if (!(await ensureReadPermission(p)).allow) return { error: '用户拒绝了文件访问权限（或授权超时）' };
       let stat;
       try { stat = await fsp.stat(p); } catch (e) { return { error: `无法访问 ${p}: ${e.message}` }; }
@@ -368,7 +449,8 @@ async function executeTool(name, args, masterSignal) {
       }
     }
     case 'list_dir': {
-      const p = resolveToolPath(String(args.path || ''));
+      const requested = resolveToolPath(String(args.path || ''));
+      const p = safeRealpath(requested) || requested;
       if (!(await ensureReadPermission(p)).allow) return { error: '用户拒绝了文件访问权限（或授权超时）' };
       let stat;
       try { stat = await fsp.stat(p); } catch (e) { return { error: `无法访问 ${p}: ${e.message}` }; }
@@ -399,7 +481,8 @@ async function executeTool(name, args, masterSignal) {
       return { path: p, count: entries.length, truncated: entries.length >= MAX_ENTRIES, entries };
     }
     case 'grep': {
-      const p = resolveToolPath(String(args.path || ''));
+      const requested = resolveToolPath(String(args.path || ''));
+      const p = safeRealpath(requested) || requested;
       if (!(await ensureReadPermission(p)).allow) return { error: '用户拒绝了文件访问权限（或授权超时）' };
       let re;
       const patternStr = String(args.pattern || '');
@@ -440,7 +523,8 @@ async function executeTool(name, args, masterSignal) {
       return { path: p, count: results.length, truncated: results.length >= maxMatches, matches: results };
     }
     case 'file_stat': {
-      const p = resolveToolPath(String(args.path || ''));
+      const requested = resolveToolPath(String(args.path || ''));
+      const p = safeRealpath(requested) || requested;
       if (!(await ensureReadPermission(p)).allow) return { error: '用户拒绝了文件访问权限（或授权超时）' };
       try {
         const s = await fsp.stat(p);
@@ -470,8 +554,8 @@ async function executeTool(name, args, masterSignal) {
       const cmdArgs = argv.slice(1);
       // 命令白名单：整条命令精确匹配（记住的是完整命令，如 "git status"）
       const allowList = Array.isArray(settings && settings.allowedCommands) ? settings.allowedCommands : [];
-      // 兼容旧版白名单（曾存命令名）：若白名单条目与命令名一致则视为匹配
-      const whitelisted = allowList.includes(command) || allowList.includes(cmdName);
+      // 仅允许完整命令精确匹配；命令名级授权会让任意参数绕过确认。
+      const whitelisted = allowList.includes(command);
       // 默认只读命令白名单：仅当在工作区/信任目录内运行时免弹窗（检查环境不卡住）
       const inTrustedCwd = isTrusted(cwd);
       const safeDefault = inTrustedCwd && DEFAULT_SAFE_COMMANDS.includes(command);
@@ -523,9 +607,7 @@ async function executeTool(name, args, masterSignal) {
       console.log(`[tool] write_file ${append ? 'append' : 'write'} -> ${p} (${content.length} chars)`);
       logApp('info', `[tool] write_file ${append ? 'append' : 'write'} -> ${p} (${content.length} chars)`);
       try {
-        fs.mkdirSync(path.dirname(p), { recursive: true });
-        if (append) fs.appendFileSync(p, content, 'utf8');
-        else fs.writeFileSync(p, content, 'utf8');
+        writeTextNoFollow(p, content, append);
         return { path: p, bytes: Buffer.byteLength(content, 'utf8'), ok: true, append };
       } catch (e) {
         return { error: `写入失败: ${e.message}` };
@@ -594,7 +676,13 @@ async function streamChat(req, onDelta) {
   }
 
   const toolsEnabled = req.mode !== 'chat'; // Chat 模式不带工具
-  const base = (settings && settings.apiBase && String(settings.apiBase).trim()) || DEEPSEEK_BASE;
+  const configuredBase = (settings && settings.apiBase && String(settings.apiBase).trim()) || DEEPSEEK_BASE;
+  const parsedBase = new URL(configuredBase);
+  const localHttp = parsedBase.protocol === 'http:' && ['localhost', '127.0.0.1', '::1'].includes(parsedBase.hostname);
+  if (parsedBase.protocol !== 'https:' && !localHttp) {
+    throw new Error('API Base 必须使用 HTTPS；只有本机 localhost 地址可使用 HTTP');
+  }
+  const base = parsedBase.href.replace(/\/$/, '');
   const body = {
     model: req.model || DEFAULT_MODEL,
     messages: req.messages,
@@ -1017,6 +1105,8 @@ async function connectMcpServer(cfg) {
   if (!name || !command) return { ok: false, error: '服务器名称与命令不能为空' };
   if (!/^[a-zA-Z0-9-]+$/.test(name) || name.includes('__')) return { ok: false, error: '名称仅允许字母、数字、连字符（且不含 __）' };
 
+  let client = null;
+  let transport = null;
   try {
     await disconnectMcpServer(name);
 
@@ -1025,23 +1115,24 @@ async function connectMcpServer(cfg) {
     const cmd = tokens[0] || command;
     const cmdArgs = [...tokens.slice(1), ...(Array.isArray(cfg.args) ? cfg.args : [])];
 
-    const client = new Client({ name: 'deepseek-desktop', version: app.getVersion() });
-    const transport = new StdioClientTransport({
+    client = new Client({ name: 'deepseek-desktop', version: app.getVersion() });
+    transport = new StdioClientTransport({
       command: cmd,
       args: cmdArgs,
       env: enrichedEnv(),
     });
+    const pending = {
+      client, transport, tools: new Map(),
+      trusted: Boolean(cfg.trusted),
+      trustedTools: new Set(Array.isArray(cfg.trustedTools) ? cfg.trustedTools : []),
+      cfg: { ...cfg, name, command }, error: null,
+    };
+    mcpClients.set(name, pending);
     await client.connect(transport);
     const toolsResult = await client.listTools();
     const tools = new Map();
     for (const t of (toolsResult.tools || [])) tools.set(t.name, t);
-    mcpClients.set(name, {
-      client, transport, tools,
-      trusted: Boolean(cfg.trusted),
-      trustedTools: new Set(Array.isArray(cfg.trustedTools) ? cfg.trustedTools : []),
-      cfg: { ...cfg, name, command },
-      error: null,
-    });
+    pending.tools = tools;
     console.log(`[mcp] connected "${name}": ${tools.size} tools`);
     return { ok: true, toolsCount: tools.size, tools: [...tools.keys()] };
   } catch (e) {
@@ -1054,7 +1145,11 @@ async function connectMcpServer(cfg) {
         ? `无法启动命令（${cmd} 解析到 ${found} 但执行失败）`
         : `找不到命令「${cmd}」。请确认已安装 Node.js，或在设置里使用完整路径（如 /opt/homebrew/bin/npx @modelcontextprotocol/server-filesystem /path）`;
     }
-    mcpClients.set(name, { client: null, transport: null, tools: new Map(), trusted: false, cfg: { ...cfg, name, command }, error: msg });
+    const current = mcpClients.get(name);
+    if (current && current.transport === transport) {
+      try { if (client) await client.close(); } catch {}
+      mcpClients.set(name, { client: null, transport: null, tools: new Map(), trusted: false, trustedTools: new Set(), cfg: { ...cfg, name, command }, error: msg });
+    }
     return { ok: false, error: msg };
   }
 }
@@ -1143,7 +1238,7 @@ async function callMcpTool(fullName, args) {
 
 /* ---------- MCP 设置 IPC ---------- */
 
-ipcMain.handle('mcp:list', () => {
+secureHandle('mcp:list', () => {
   return mcpServerList().map((cfg) => {
     const c = mcpClients.get(cfg.name);
     return {
@@ -1161,7 +1256,7 @@ ipcMain.handle('mcp:list', () => {
 });
 
 /* 工具级信任开关 */
-ipcMain.handle('mcp:setToolTrust', (_e, { name, tool, trusted }) => {
+secureHandle('mcp:setToolTrust', (_e, { name, tool, trusted }) => {
   const c = mcpClients.get(String(name || ''));
   if (!c) return { ok: false, error: '服务器未连接' };
   const toolName = String(tool || '');
@@ -1175,13 +1270,14 @@ ipcMain.handle('mcp:setToolTrust', (_e, { name, tool, trusted }) => {
 
 /* 连接 MCP 服务器带超时（npx 首次拉包可能很慢） */
 function withTimeout(promise, ms, label) {
+  let timer;
   return Promise.race([
     promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label}超时（${ms / 1000} 秒）`)), ms)),
-  ]);
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label}超时（${ms / 1000} 秒）`)), ms); }),
+  ]).finally(() => clearTimeout(timer));
 }
 
-ipcMain.handle('mcp:add', async (_e, { name, command, args }) => {
+secureHandle('mcp:add', async (_e, { name, command, args }) => {
   const cfg = {
     name: String(name || '').trim(),
     command: String(command || '').trim(),
@@ -1190,6 +1286,11 @@ ipcMain.handle('mcp:add', async (_e, { name, command, args }) => {
   if (!cfg.name || !cfg.command) return { ok: false, error: '名称与命令不能为空' };
   if (!/^[a-zA-Z0-9-]+$/.test(cfg.name) || cfg.name.includes('__')) return { ok: false, error: '名称仅允许字母、数字、连字符（且不含 __）' };
   try {
+    const permission = await askPermission({
+      kind: 'mcp_start', action: '启动 MCP 服务器', command: cfg.command,
+      argsSummary: JSON.stringify(cfg.args).slice(0, 300),
+    });
+    if (!permission.allow) return { ok: false, error: '用户拒绝启动 MCP 服务器（或授权超时）' };
     // 先测试连接（带 60s 超时）
     const test = await withTimeout(connectMcpServer(cfg), 60000, '连接');
     if (!test.ok) return { ok: false, error: test.error };
@@ -1203,23 +1304,32 @@ ipcMain.handle('mcp:add', async (_e, { name, command, args }) => {
   }
 });
 
-ipcMain.handle('mcp:remove', async (_e, name) => {
+secureHandle('mcp:remove', async (_e, name) => {
   await disconnectMcpServer(String(name || ''));
   const list = mcpServerList().filter((s) => s.name !== name);
   saveSettings({ mcpServers: list });
   return { ok: true };
 });
 
-ipcMain.handle('mcp:test', async (_e, { name, command, args }) => {
+secureHandle('mcp:test', async (_e, { name, command, args }) => {
+  const testName = `test-${Date.now()}`;
+  const testCommand = String(command || '').trim();
   try {
+    const permission = await askPermission({
+      kind: 'mcp_start', action: '测试 MCP 服务器', command: testCommand,
+      argsSummary: JSON.stringify(Array.isArray(args) ? args : []).slice(0, 300),
+    });
+    if (!permission.allow) return { ok: false, error: '用户拒绝启动测试进程（或授权超时）' };
     const result = await withTimeout(connectMcpServer({
-      name: String(name || 'mcp-test').trim(),
-      command: String(command || '').trim(),
+      name: testName,
+      command: testCommand,
       args: Array.isArray(args) ? args.map(String) : [],
     }), 60000, '连接');
     return result;
   } catch (e) {
     return { ok: false, error: e.message };
+  } finally {
+    await disconnectMcpServer(testName);
   }
 });
 
@@ -1244,10 +1354,10 @@ function resolveInWorkspace(p) {
   const base = root || os.homedir();
   const full = path.isAbsolute(p) ? path.normalize(p) : path.resolve(base, p);
   if (!withinWorkspace(full)) return null;
-  return full;
+  return safeRealpath(full);
 }
 
-ipcMain.handle('fs:listDir', async (_e, dirPath) => {
+secureHandle('fs:listDir', async (_e, dirPath) => {
   const root = workspaceReal();
   if (!root) return { ok: false, error: '未设置工作区' };
   const dir = resolveInWorkspace(dirPath || root);
@@ -1264,7 +1374,7 @@ ipcMain.handle('fs:listDir', async (_e, dirPath) => {
   }
 });
 
-ipcMain.handle('fs:preview', async (_e, filePath) => {
+secureHandle('fs:preview', async (_e, filePath) => {
   const full = resolveInWorkspace(String(filePath || ''));
   if (!full) return { ok: false, error: '路径不在工作区内' };
   try {
@@ -1292,7 +1402,7 @@ ipcMain.handle('fs:preview', async (_e, filePath) => {
 
 /* ================= IPC ================= */
 
-ipcMain.handle('app:info', () => ({
+secureHandle('app:info', () => ({
   version: app.getVersion(),
   platform: process.platform,
   arch: process.arch,
@@ -1303,12 +1413,17 @@ ipcMain.handle('app:info', () => ({
   readOnly: Boolean(settings && settings.readOnly),
 }));
 
-ipcMain.handle('settings:get', () => ({ ...settings, apiKeyConfigured: Boolean(resolveApiKey()), apiKeySource: apiKeySource() }));
+function publicSettings() {
+  const { apiKey: _plain, apiKeyEncrypted: _encrypted, ...safe } = settings || {};
+  return { ...safe, apiKeyConfigured: Boolean(resolveApiKey()), apiKeySource: apiKeySource() };
+}
+
+secureHandle('settings:get', () => publicSettings());
 
 /* 允许持久化的设置键（白名单 + 类型校验，防止任意字段注入） */
-const SETTING_KEYS = ['model', 'system', 'temperature', 'maxTokens', 'trustHome', 'trustedRoots', 'workspace', 'readOnly', 'allowedCommands', 'theme', 'mode', 'apiKey', 'mcpServers', 'apiBase', 'customModels'];
+const SETTING_KEYS = ['model', 'system', 'temperature', 'maxTokens', 'trustHome', 'trustedRoots', 'workspace', 'readOnly', 'allowedCommands', 'theme', 'mode', 'apiKey', 'apiBase', 'customModels'];
 
-ipcMain.handle('settings:set', (_e, patch) => {
+secureHandle('settings:set', (_e, patch) => {
   const next = {};
   if (patch && typeof patch === 'object') {
     for (const k of Object.keys(patch)) {
@@ -1331,22 +1446,14 @@ ipcMain.handle('settings:set', (_e, patch) => {
             next[k] = v.map((x) => String(x).trim()).filter((x) => x && x !== '/');
           }
           break;
-        case 'mcpServers':
-          if (Array.isArray(v)) {
-            next[k] = v
-              .filter((s) => s && typeof s === 'object')
-              .map((s) => ({
-                name: String(s.name || '').trim(),
-                command: String(s.command || '').trim(),
-                args: Array.isArray(s.args) ? s.args.map(String) : [],
-                trusted: Boolean(s.trusted),
-                trustedTools: Array.isArray(s.trustedTools) ? s.trustedTools.map(String) : [],
-              }))
-              .filter((s) => s.name && s.command);
-          }
-          break;
         case 'apiBase':
-          if (typeof v === 'string' && /^https?:\/\//.test(v.trim()) && v.trim().length <= 200) next.apiBase = v.trim();
+          if (typeof v === 'string' && v.trim().length <= 200) {
+            try {
+              const u = new URL(v.trim());
+              const localHttp = u.protocol === 'http:' && ['localhost', '127.0.0.1', '::1'].includes(u.hostname);
+              if (u.protocol === 'https:' || localHttp) next.apiBase = u.href.replace(/\/$/, '');
+            } catch {}
+          }
           break;
         case 'customModels':
           if (typeof v === 'string' && v.length <= 2000) {
@@ -1365,21 +1472,26 @@ ipcMain.handle('settings:set', (_e, patch) => {
           if (typeof v === 'string' && v.length <= 10000) next[k] = v;
           break;
         case 'model':
-        case 'apiKey':
           if (typeof v === 'string' && v.length <= 500) next[k] = v;
+          break;
+        case 'apiKey':
+          if (typeof v === 'string' && v.length <= 500) next.apiKeyUpdate = v;
           break;
         default:
           break;
       }
     }
   }
-  if (next.apiKey === '') delete next.apiKey;
+  if (Object.prototype.hasOwnProperty.call(next, 'apiKeyUpdate')) {
+    storeApiKey(settings, next.apiKeyUpdate);
+    delete next.apiKeyUpdate;
+  }
   const saved = saveSettings(next);
-  return { ...saved, apiKeyConfigured: Boolean(resolveApiKey()), apiKeySource: apiKeySource() };
+  return publicSettings(saved);
 });
 
 /* 选择工作区目录（原生目录对话框） */
-ipcMain.handle('workspace:pick', async () => {
+secureHandle('workspace:pick', async () => {
   const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
     title: '选择工作区目录',
     defaultPath: (settings && settings.workspace) || os.homedir(),
@@ -1392,7 +1504,7 @@ ipcMain.handle('workspace:pick', async () => {
 });
 
 /* 窗口置顶切换 */
-ipcMain.handle('window:pin', (_e, pin) => {
+secureHandle('window:pin', (_e, pin) => {
   if (!mainWindow) return { pinned: false };
   mainWindow.setAlwaysOnTop(Boolean(pin));
   return { pinned: Boolean(pin) };
@@ -1408,12 +1520,12 @@ function logApp(level, msg) {
   else console.log(line);
 }
 
-ipcMain.on('app:log', (_e, { level, msg }) => {
+secureOn('app:log', (_e, { level, msg }) => {
   logApp(level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info', `[renderer] ${msg}`);
 });
 
 /* 读取文本文件（拖放附件用），限 2MB；与工具一致走权限检查 */
-ipcMain.handle('file:readText', async (_e, filePath) => {
+secureHandle('file:readText', async (_e, filePath) => {
   try {
     const real = fs.realpathSync(String(filePath));
     const stat = fs.statSync(real);
@@ -1431,7 +1543,7 @@ ipcMain.handle('file:readText', async (_e, filePath) => {
 });
 
 /* 写入文本文件（Canvas 保存用）：工作区内免弹窗，之外弹窗；只读检查 */
-ipcMain.handle('file:writeText', async (_e, { path: filePath, content }) => {
+secureHandle('file:writeText', async (_e, { path: filePath, content }) => {
   try {
     if (settings && settings.readOnly) return { ok: false, error: '只读模式已开启，禁止写入文件' };
     const p = resolveToolPath(String(filePath || ''));
@@ -1441,8 +1553,7 @@ ipcMain.handle('file:writeText', async (_e, { path: filePath, content }) => {
     }
     const perm = await ensureWritePermission(p);
     if (!perm.allow) return { ok: false, error: '用户拒绝写入（或授权超时）' };
-    fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(p, content, 'utf8');
+    writeTextNoFollow(p, content, false);
     return { ok: true, path: p };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -1465,7 +1576,7 @@ function registerGlobalShortcut() {
   }
 }
 
-ipcMain.handle('chat:start', async (_e, req) => {
+secureHandle('chat:start', async (_e, req) => {
   const id = req.id || String(Date.now());
   // 并发保护：同一 id 已有对话进行中则拒绝（防止 UI 状态机之外的重复请求）
   if (chatMasters.has(id)) return { started: false, error: '已有对话进行中' };
@@ -1490,12 +1601,12 @@ ipcMain.handle('chat:start', async (_e, req) => {
   return { started: true };
 });
 
-ipcMain.on('chat:cancel', (_e, id) => {
+secureOn('chat:cancel', (_e, id) => {
   const m = chatMasters.get(id);
   if (m) m.abort();
 });
 
-ipcMain.handle('export:save', async (_e, { defaultName, content }) => {
+secureHandle('export:save', async (_e, { defaultName, content }) => {
   const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
     title: '导出对话',
     defaultPath: defaultName || '对话.md',
@@ -1508,7 +1619,7 @@ ipcMain.handle('export:save', async (_e, { defaultName, content }) => {
 
 /* 朗读回复（macOS say，数组参数无 shell 注入面） */
 let speakProc = null;
-ipcMain.handle('speech:speak', (_e, { text }) => {
+secureHandle('speech:speak', (_e, { text }) => {
   try {
     const t = String(text || '').trim().slice(0, 8000);
     if (!t) return { ok: false, error: '无内容' };
@@ -1521,13 +1632,13 @@ ipcMain.handle('speech:speak', (_e, { text }) => {
     return { ok: false, error: e.message };
   }
 });
-ipcMain.handle('speech:stop', () => {
+secureHandle('speech:stop', () => {
   if (speakProc) { try { speakProc.kill('SIGTERM'); } catch {} speakProc = null; }
   return { ok: true };
 });
 
 /* 互通：把内容复制到剪贴板并尝试打开 DSH Harness 界面（127.0.0.1:3080） */
-ipcMain.handle('dsh:toHarness', async (_e, { text }) => {
+secureHandle('dsh:toHarness', async (_e, { text }) => {
   try {
     clipboard.writeText(String(text || ''));
     const opened = await new Promise((resolve) => {
@@ -1816,6 +1927,24 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
+  const openExternalHttps = (rawUrl) => {
+    try {
+      const u = new URL(rawUrl);
+      if (u.protocol === 'https:') shell.openExternal(u.href);
+    } catch {}
+  };
+  mainWindow.webContents.on('will-navigate', (event, targetUrl) => {
+    if (targetUrl === APP_PAGE_URL) return;
+    event.preventDefault();
+    openExternalHttps(targetUrl);
+  });
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    openExternalHttps(url);
+    return { action: 'deny' };
+  });
+  mainWindow.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+  mainWindow.webContents.session.setPermissionCheckHandler(() => false);
+
   mainWindow.once('ready-to-show', () => mainWindow.show());
   mainWindow.on('closed', () => { mainWindow = null; });
   return mainWindow;
@@ -1823,6 +1952,20 @@ function createWindow() {
 
 app.whenReady().then(() => {
   settings = loadSettings();
+  let settingsMigrated = false;
+  if (typeof settings.apiKey === 'string') {
+    const legacyKey = settings.apiKey;
+    storeApiKey(settings, legacyKey);
+    settingsMigrated = true;
+  }
+  if (Array.isArray(settings.allowedCommands)) {
+    const exactOnly = settings.allowedCommands.filter((cmd) => /\s/.test(String(cmd).trim()));
+    if (exactOnly.length !== settings.allowedCommands.length) {
+      settings.allowedCommands = exactOnly;
+      settingsMigrated = true;
+    }
+  }
+  if (settingsMigrated) saveSettings({});
   logApp('info', `started v${app.getVersion()} userData=${app.getPath('userData')} net=native-http`);
   // 强制直连：系统代理可能指向未运行的代理进程（如 clash 关闭），会导致 API 请求全部失败
   try {
